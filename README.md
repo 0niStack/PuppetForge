@@ -3,10 +3,16 @@
 | Folder | What it does |
 |---|---|
 | `01-local/`  | Installs Puppet and configures nginx on **this** machine with `puppet apply` |
-| `02-remote/` | Asks for a VM's **IP + SSH key**, then configures nginx on the VM over SSH with **Puppet Bolt** |
+| `02-remote/` | Asks for a VM's **IP + SSH key**, installs Puppet on the VM over SSH and applies the same manifest |
 
 Written for Ubuntu/Debian. Run the scripts as a normal user with sudo.
-Classic Puppet agent/server uses certificates, not SSH, which is why Bolt is used for the remote VM.
+
+## Why no Bolt?
+
+Bolt 5.0 and later is only published in a protected repository that needs Puppet Core or
+Puppet Enterprise credentials, so `apt install puppet-bolt` fails on Ubuntu 24.04 with
+"Unable to locate package". `02-remote/` therefore uses plain `ssh` + `scp` + `puppet apply`.
+It needs no extra tools on your machine and no credentials.
 
 ## Layout
 
@@ -16,11 +22,10 @@ puppet-nginx-lab/
 ├── 01-local/
 │   ├── install-puppet.sh   # installs puppet-agent (Puppet 8)
 │   ├── apply.sh            # dry run -> apply -> curl check
-│   └── nginx.pp            # the manifest
+│   └── nginx.pp
 └── 02-remote/
-    ├── install-bolt.sh     # installs puppet-bolt
-    ├── deploy.sh           # prompts for IP/user/key, builds inventory, applies
-    └── nginx.pp            # same manifest
+    ├── deploy.sh           # prompts for IP/user/key, installs puppet on VM, applies
+    └── nginx.pp
 ```
 
 ## 01 - Local
@@ -28,70 +33,49 @@ puppet-nginx-lab/
 ```bash
 cd 01-local
 ./install-puppet.sh
-./apply.sh            # shows a --noop dry run, then asks before applying
+./apply.sh
 ```
 
-Check: `curl http://localhost` should print `Hello from Puppet on <hostname>`.
-Run `./apply.sh` again: it should report no changes (idempotent).
+Check: `curl http://localhost` prints `Hello from Puppet on <hostname>`.
+Run `./apply.sh` again: it should report no changes.
 
 ## 02 - Remote VM
 
-Prerequisites on the VM: Ubuntu/Debian, SSH reachable, your user has sudo
-(passwordless sudo is easiest).
+Needs: Ubuntu/Debian VM reachable over SSH, and a user with passwordless sudo.
 
 ```bash
 cd 02-remote
 ./deploy.sh
 ```
 
-It will ask for:
+Prompts: VM IP/hostname, SSH user (default `ubuntu`), port (default `22`),
+private key path (default `~/.ssh/id_ed25519`).
 
-1. VM IP or hostname
-2. SSH user (default `ubuntu`)
-3. SSH port (default `22`)
-4. Path to your private key (default `~/.ssh/id_ed25519`)
+Steps it performs (each prints its progress):
 
-Then it:
+```
+[1/6] Testing SSH
+[2/6] Checking passwordless sudo
+[3/6] Looking for puppet on the VM (installs puppet-agent if missing)
+[4/6] Copying nginx.pp
+[5/6] Dry run (puppet apply --noop), then asks to continue
+[6/6] Applying, then curl check
+```
 
-- installs Bolt if missing
-- generates the key and runs `ssh-copy-id` if the key doesn't exist or login fails
-- tests key-based SSH login
-- writes `inventory.yaml` (git-ignored)
-- checks it can run as root via sudo
-- runs `bolt apply nginx.pp --noop`, asks to continue, then applies for real
-- curls the VM to verify
+If the key is missing, or login fails, it offers to generate a key and run `ssh-copy-id`.
+Any failure prints `ERROR at line N: <command>`.
 
-### Passwordless sudo on the VM (if the check fails)
+Passwordless sudo, run on the VM:
 
 ```bash
 echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/ubuntu
-```
-
-### Manual commands (what the script runs)
-
-```bash
-bolt command run 'hostname && whoami' --targets web1
-bolt apply nginx.pp --targets web1 --noop
-bolt apply nginx.pp --targets web1
 ```
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---|---|
-| `curl` to the VM hangs | `sudo ufw allow 80/tcp` on the VM, and open port 80 in your cloud/hypervisor firewall |
-| `Permission denied (publickey)` | Run `ssh-copy-id -i ~/.ssh/id_ed25519.pub user@VM_IP`; check the key path |
-| `puppet: command not found` | Use `/opt/puppetlabs/bin/puppet` or add it to PATH |
-| `.deb` download 404 | Your distro codename isn't published; see https://apt.puppet.com and edit the URL in the install script |
-| Rocky/RHEL | Replace `apt`/`dpkg` in the install scripts with the matching `.rpm` release package from https://yum.puppet.com |
-
-## Security notes
-
-- `host-key-check: false` is for labs only. Remove it in production and pin host keys.
-- Never commit private keys. `inventory.yaml` is git-ignored because it contains your key path and IP.
-
-## Next steps
-
-- Add more VMs under `targets:` in `inventory.yaml` and use `--targets all`.
-- Turn `nginx.pp` into a module with `.epp` templates for `/etc/nginx/conf.d/`.
-- Use `notify => Service['nginx']` on config files so nginx reloads on change.
+| Script stops with no message | Run `bash -x ./deploy.sh`; the last `+` line is the failing command |
+| Test SSH by hand | `ssh -v -i ~/.ssh/id_ed25519 -o BatchMode=yes user@VM_IP 'echo SSH_OK'` |
+| `Permission denied (publickey)` | `ssh-copy-id -i ~/.ssh/id_ed25519.pub user@VM_IP`; on AWS you may need the `.pem` key path instead |
+| `Passwordless sudo
